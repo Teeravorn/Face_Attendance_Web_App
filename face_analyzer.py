@@ -38,8 +38,8 @@ class FaceAnalyzer:
         model_name: str = "buffalo_l",
         ctx_id: int = 0,
         det_size: tuple = (320, 320),
-        data_dir: str = "/home/ubuntu/projects/insightface/web_app_face_recog/known_faces",
-        sessions_dir: str = "/home/ubuntu/projects/insightface/web_app_face_recog/sessions",
+        data_dir: str = "/home/jetson/Face_Attendance_Web_App/known_faces",
+        sessions_dir: str = "/home/jetson/Face_Attendance_Web_App/sessions",
     ):
         self.app = FaceAnalysis(name=model_name)
         self.app.prepare(ctx_id=ctx_id, det_size=det_size)
@@ -395,7 +395,7 @@ class FaceAnalyzer:
 
             person_id = str(img_path).split("/")[-2]
             result = self._enroll_from_file(
-                str(img_path), person_id, name, min_score
+                str(img_path), person_id, person_id, min_score
             )
 
             result["file"] = img_path.name
