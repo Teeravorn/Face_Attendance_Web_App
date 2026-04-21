@@ -38,8 +38,8 @@ class FaceAnalyzer:
         model_name: str = "buffalo_l",
         ctx_id: int = 0,
         det_size: tuple = (320, 320),
-        data_dir: str = "Face_Attendance_Web_App/known_faces",
-        sessions_dir: str = "Face_Attendance_Web_App/sessions",
+        data_dir: str = "/home/ubuntu/gits/Face_Attendance_Web_App/known_faces",
+        sessions_dir: str = "/home/ubuntu/gits/Face_Attendance_Web_App/sessions",
     ):
         self.app = FaceAnalysis(name=model_name, allowed_modules=["detection", "recognition"])
         self.app.prepare(ctx_id=ctx_id, det_size=det_size)
@@ -162,7 +162,7 @@ class FaceAnalyzer:
 
     def _load_default_database(self) -> None:
         """Load a default set of known faces."""
-        source_face_dir = "projects/Dataset/images/"
+        source_face_dir = "/home/ubuntu/gits/Face_Attendance_Web_App/source_images"
         folder_path = Path(os.path.abspath(source_face_dir))
 
         images = list(folder_path.rglob("*.jpg"))
@@ -227,7 +227,6 @@ class FaceAnalyzer:
                 "duration_seconds": None,
                 "present_count": 0,
                 "records": {},  # {person_id: {name, first_seen, last_seen, seen_count}}
-                "video_file": None,
             }
         return {"success": True}
 
@@ -239,6 +238,7 @@ class FaceAnalyzer:
             ended_at = datetime.now(timezone.utc)
             started_at = datetime.fromisoformat(session["started_at"])
             session["ended_at"] = ended_at.isoformat("#", "seconds")
+
             session["duration_seconds"] = int((ended_at - started_at).total_seconds())
             session["present_count"] = len(session["records"])
             self._sessions.append(session)
@@ -255,15 +255,19 @@ class FaceAnalyzer:
             now = datetime.now(timezone.utc).isoformat()
             rec = self._session["records"]
             if person_id not in rec:
+
+                first_seen = datetime.now(timezone.utc).replace(tzinfo=None)
+                last_seen = first_seen
                 rec[person_id] = {
                     "name": name,
-                    "first_seen": datetime.now(timezone.utc).replace(tzinfo=None).isoformat("#", "seconds"),
-                    "last_seen": datetime.now(timezone.utc).replace(tzinfo=None).isoformat("#", "seconds"),
+                    "first_seen": first_seen.isoformat("#", "seconds"),
+                    "last_seen": last_seen.isoformat("#", "seconds"),
                     "seen_count": 1,
                 }
             else:
-                rec[person_id]["last_seen"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat("#", "seconds")
-                rec[person_id]["seen_count"] += 1
+                last_seen = datetime.now(timezone.utc).replace(tzinfo=None)
+                rec[person_id]["last_seen"] = last_seen.isoformat("#", "seconds")
+                rec[person_id]["seen_count"] = int(last_seen.timestamp() - datetime.fromisoformat(rec[person_id]["first_seen"]).timestamp())
 
             print(rec)
             self._session["present_count"] = len(rec)
