@@ -23,14 +23,6 @@ frame_queue: queue.Queue = queue.Queue(maxsize=1)
 current_faces: list[dict] = []
 current_faces_lock = threading.Lock()
 
-# Video recording state
-video_frames: list[np.ndarray] = []
-video_frames_lock = threading.Lock()
-recording_active: bool = False
-recording_fps: float = 30.0
-recording_frame_size: tuple = (320, 240)
-video_frame_times: list[float] = []  # Track timestamps for actual FPS calculation
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # FaceAnalyzer
@@ -48,7 +40,6 @@ class FaceAnalyzer:
         det_size: tuple = (320, 320),
         data_dir: str = "Face_Attendance_Web_App/known_faces",
         sessions_dir: str = "Face_Attendance_Web_App/sessions",
-        videos_dir: str = "Face_Attendance_Web_App/sessions/videos",
     ):
         self.app = FaceAnalysis(name=model_name, allowed_modules=["detection", "recognition"])
         self.app.prepare(ctx_id=ctx_id, det_size=det_size)
@@ -61,9 +52,6 @@ class FaceAnalyzer:
 
         self.sessions_dir = Path(os.path.abspath(sessions_dir))
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-
-        self.videos_dir = Path(os.path.abspath(videos_dir))
-        self.videos_dir.mkdir(parents=True, exist_ok=True)
 
         self.db_path = self.data_dir / "known_faces.json"
         self.sessions_path = self.sessions_dir / "sessions.json"
@@ -225,50 +213,10 @@ class FaceAnalyzer:
             self._sessions = json.load(f)
         print(f"[Sessions] Loaded {len(self._sessions)} sessions.")
 
-    def _save_video(self, frames: list[np.ndarray], session_id: str) -> Path:
-        """Save recorded frames to a video file using actual captured frame rate."""
-        global video_frame_times
-        
-        if not frames:
-            return None
-        
-        # Calculate actual FPS from frame timestamps
-        actual_fps = 30.0
-        if len(video_frame_times) > 1:
-            time_span = video_frame_times[-1] - video_frame_times[0]
-            if time_span > 0:
-                actual_fps = (len(video_frame_times) - 1) / time_span
-                print(f"[Video] Calculated actual FPS: {actual_fps:.2f}")
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        video_path = self.videos_dir / f"session_{session_id}_{timestamp}.mp4"
-        
-        # Use MP4V codec for MP4 format
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(
-            str(video_path),
-            fourcc,
-            actual_fps,
-            recording_frame_size,
-        )
-        
-        if not out.isOpened():
-            print(f"[Video] Failed to open video writer for {video_path}")
-            return None
-        
-        for frame in frames:
-            # Resize frame to match video writer dimensions
-            resized = cv2.resize(frame, recording_frame_size)
-            out.write(resized)
-        
-        out.release()
-        print(f"[Video] Saved {len(frames)} frames at {actual_fps:.2f} fps to {video_path}")
-        return video_path
-
     # ── Session management ────────────────────────────────────────────────────
 
     def start_session(self, session_name: str) -> dict:
-        global recording_active, video_frames
+        global recording_active
         with self._lock:
             session_id = str(uuid.uuid4())
             self._session = {
@@ -281,15 +229,9 @@ class FaceAnalyzer:
                 "records": {},  # {person_id: {name, first_seen, last_seen, seen_count}}
                 "video_file": None,
             }
-        # Start video recording
-        with video_frames_lock:
-            video_frames.clear()
-            recording_active = True
-        print(f"[Session] Video recording started for session {session_id}")
         return {"success": True}
 
     def stop_session(self) -> dict:
-        global recording_active, video_frames, video_frame_times
         with self._lock:
             if not self._session:
                 return {"success": False, "error": "No active session"}
@@ -301,17 +243,7 @@ class FaceAnalyzer:
             session["present_count"] = len(session["records"])
             self._sessions.append(session)
             self._session = None
-        
-        # Stop video recording and save
-        with video_frames_lock:
-            recording_active = False
-            if video_frames:
-                video_path = self._save_video(video_frames, session["session_id"])
-                session["video_file"] = str(video_path)
-                print(f"[Session] Video saved to {video_path}")
-                video_frames.clear()
-                video_frame_times.clear()
-        
+                
         self._save_sessions()
         return {"success": True, "summary": {"present_count": session["present_count"]}}
 
@@ -505,8 +437,8 @@ face_analyzer = FaceAnalyzer(model_name="buffalo_m", ctx_id=0, det_size=(256, 25
 
 def video_stream_thread(
     camera_id: int = 2,
-    frame_width: int = 640 / 2,
-    frame_height: int = 480 / 2,
+    frame_width: int = 640,
+    frame_height: int = 480,
     fps: int = 30,
 ) -> None:
     """Capture frames from the camera and push them onto frame_queue."""
@@ -568,20 +500,13 @@ def face_analyze_thread() -> None:
     Consume frames from frame_queue, run detection + recognition,
     update current_faces and output_frame, and capture frames for video recording.
     """
-    global output_frame, current_faces, recording_active, video_frames, video_frame_times
+    global output_frame, current_faces, recording_active
 
     while True:
         try:
             frame = frame_queue.get(timeout=1)
         except queue.Empty:
             continue
-
-        # Capture frame for video recording if active
-        if recording_active:
-            with video_frames_lock:
-                if recording_active and len(video_frames) < 10800:  # ~6 minutes at 30 fps
-                    video_frames.append(frame.copy())
-                    video_frame_times.append(time.time())
 
         raw_faces = face_analyzer.app.get(frame)
         annotated = frame.copy()

@@ -5,3 +5,4 @@ opencv_python==4.13.0.92
 opencv_python_headless==4.13.0.92
 pydantic==2.13.0
 uvicorn==0.44.0
+websockets==12.0

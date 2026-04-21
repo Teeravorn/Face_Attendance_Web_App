@@ -1,9 +1,14 @@
 import csv
 import io
 import threading
+import time
+import base64
+import json
+import asyncio
 
+import cv2
 import uvicorn
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -12,9 +17,43 @@ import face_analyzer as fa  # import the module so we always see the current glo
 
 app = FastAPI(title="Face Recognition")
 
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list = []
+        self.lock = threading.Lock()
+    
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        with self.lock:
+            self.active_connections.append(websocket)
+    
+    def disconnect(self, websocket: WebSocket):
+        with self.lock:
+            if websocket in self.active_connections:
+                self.active_connections.remove(websocket)
+    
+    async def broadcast(self, message: dict):
+        with self.lock:
+            connections_copy = list(self.active_connections)
+        
+        disconnected = []
+        for connection in connections_copy:
+            try:
+                await connection.send_json(message)
+            except Exception as e:
+                disconnected.append(connection)
+        
+        for conn in disconnected:
+            self.disconnect(conn)
+
+manager = ConnectionManager()
+last_frame_send_time = time.time()
+frame_send_interval = 0.05  # ~20 fps for WebSocket streaming
+
 
 # ═════════════════════════════════════════════════════════════════════════════
-# UI & video stream
+# UI & WebSocket streaming
 # ═════════════════════════════════════════════════════════════════════════════
 
 @app.get("/", response_class=HTMLResponse)
@@ -22,8 +61,80 @@ async def index():
     return HTML_TEMPLATE
 
 
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time video and face data streaming."""
+    await manager.connect(websocket)
+    last_faces_update = time.time()
+    
+    try:
+        while True:
+            # Receive any incoming messages (for future extensibility)
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
+                # Process incoming commands if needed
+                print(f"[WS] Received: {data}")
+            except asyncio.TimeoutError:
+                pass
+            
+            current_time = time.time()
+            
+            # Send video frame at controlled interval
+            global last_frame_send_time
+            if current_time - last_frame_send_time >= frame_send_interval:
+                last_frame_send_time = current_time
+                
+                with fa.frame_lock:
+                    if fa.output_frame is not None:
+                        _, buffer = cv2.imencode(
+                            '.jpg', fa.output_frame,
+                            [cv2.IMWRITE_JPEG_QUALITY, 75]
+                        )
+                        frame_bytes = base64.b64encode(buffer).decode('utf-8')
+                        await websocket.send_json({
+                            'type': 'frame',
+                            'frame': frame_bytes,
+                            'timestamp': current_time,
+                        })
+            
+            # Send face data at lower frequency (every 300ms)
+            if current_time - last_faces_update >= 0.3:
+                last_faces_update = current_time
+                
+                with fa.current_faces_lock:
+                    snapshot = list(fa.current_faces)
+                
+                faces_out = [
+                    {
+                        'identified': f['identified'],
+                        'matches': f['matches'],
+                        'detection_score': f['detection_score'],
+                        'first_seen_this_session': f['first_seen_this_session'],
+                        'last_seen': f.get('last_seen'),
+                    }
+                    for f in snapshot
+                ]
+                
+                await websocket.send_json({
+                    'type': 'faces',
+                    'faces': faces_out,
+                    'db_size': fa.face_analyzer.db_size(),
+                    'session_present': fa.face_analyzer.session_present_count(),
+                    'threshold': fa.face_analyzer.THRESHOLD,
+                    'session_active': fa.face_analyzer.session_active(),
+                    'timestamp': current_time,
+                })
+            
+            await asyncio.sleep(0.01)
+    
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        print("[WS] Client disconnected")
+
+
 @app.get("/video_feed")
 async def video_feed():
+    """Legacy MJPEG endpoint - kept for backward compatibility."""
     return StreamingResponse(
         fa.generate_frames(),
         media_type="multipart/x-mixed-replace; boundary=frame",

@@ -280,7 +280,8 @@ h1{text-align:center;font-size:2.1rem;font-weight:700;}
 
         <div class="live-layout">
             <div class="panel">
-                <img id="videoStream" src="/video_feed">
+                <canvas id="videoStream" width="640" height="480" style="width:100%;background:#000;display:block;"></canvas>
+                <div id="wsStatus" style="font-size:.7rem;color:var(--text-sub);margin-top:8px;text-align:center;">Connecting to stream...</div>
             </div>
             <div class="right-col">
                 <div class="panel">
@@ -601,6 +602,104 @@ function stopSession() {
             showToast('Session ended — ' + data.summary.present_count + ' people present');
         }
     });
+}
+
+// ══ WebSocket Connection ══════════════════════════════
+let ws = null;
+let wsReconnectTimeout = null;
+let wsReconnectDelay = 1000;
+
+function initWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    
+    ws = new WebSocket(wsUrl);
+    
+    ws.onopen = () => {
+        console.log('[WS] Connected');
+        document.getElementById('wsStatus').textContent = '✓ Streaming';
+        document.getElementById('wsStatus').style.color = '#86efac';
+        wsReconnectDelay = 1000; // Reset backoff on successful connection
+    };
+    
+    ws.onmessage = (event) => {
+        try {
+            const message = JSON.parse(event.data);
+            
+            if (message.type === 'frame') {
+                // Display video frame on canvas
+                const canvas = document.getElementById('videoStream');
+                const ctx = canvas.getContext('2d');
+                const img = new Image();
+                img.onload = () => {
+                    ctx.drawImage(img, 0, 0);
+                };
+                img.src = 'data:image/jpeg;base64,' + message.frame;
+            } 
+            else if (message.type === 'faces') {
+                // Update face data
+                updateFacesFromWS(message);
+            }
+        } catch(e) {
+            console.error('[WS] Message parse error:', e);
+        }
+    };
+    
+    ws.onerror = (error) => {
+        console.error('[WS] Error:', error);
+        document.getElementById('wsStatus').textContent = '✗ Connection error';
+        document.getElementById('wsStatus').style.color = '#ef4444';
+    };
+    
+    ws.onclose = () => {
+        console.log('[WS] Disconnected');
+        document.getElementById('wsStatus').textContent = '⟳ Reconnecting...';
+        document.getElementById('wsStatus').style.color = '#f59e0b';
+        // Attempt reconnection with exponential backoff
+        wsReconnectTimeout = setTimeout(() => {
+            wsReconnectDelay = Math.min(wsReconnectDelay * 1.5, 30000);
+            initWebSocket();
+        }, wsReconnectDelay);
+    };
+}
+
+function updateFacesFromWS(data) {
+    document.getElementById('facesCount').textContent = data.faces.length;
+    document.getElementById('dbCount').textContent = data.db_size;
+    document.getElementById('identifiedCount').textContent = data.faces.filter(f=>f.identified).length;
+    document.getElementById('sessionCount').textContent = data.session_present;
+    document.getElementById('thresholdBadge').textContent = 'threshold: ' + data.threshold;
+    document.getElementById('dbBadge').textContent = 'db: ' + data.db_size + ' people';
+    if(data.session_active) {
+        document.getElementById('runningCount').textContent = data.session_present;
+    }
+
+    const list = document.getElementById('facesList');
+    if(!data.faces.length) {
+        list.innerHTML = '<div style="opacity:.5;text-align:center;padding:16px">No faces detected</div>';
+        clearEnrollForm();
+        return;
+    }
+    
+    list.innerHTML = data.faces.map((face,i) => `
+        <div class="face-card ${face.identified?'identified':'unknown'} ${selectedFaceIndex===i?'selected':''}"
+             onclick="selectFace(${i})" id="faceCard${i}">
+            <div class="face-header">
+                <div class="face-name">${face.identified?'&#10003; '+face.matches[0].name:'&#10067; Unknown'}</div>
+                <span style="font-size:.73rem;color:var(--text-sub)">Face ${i+1}</span>
+            </div>
+            ${face.identified?`<div style="font-size:.77rem;color:#86efac">
+                Match: ${(face.matches[0].similarity*100).toFixed(1)}%
+                ${face.first_seen_this_session?'<span style="color:var(--info);margin-left:6px">&#128336; First seen</span>':''}
+            </div>`:''}
+            <div style="font-size:.74rem;color:var(--text-sub);margin-top:3px">
+                Detection: ${face.detection_score.toFixed(3)}
+                ${face.last_seen?'&nbsp;&bull;&nbsp;Last: '+face.last_seen:''}
+            </div>
+        </div>
+    `).join('');
+    
+    if(selectedFaceIndex >= data.faces.length) clearEnrollForm();
 }
 
 // ══ Live Detection ════════════════════════════════════
@@ -1005,8 +1104,8 @@ document.getElementById('confirmBox').addEventListener('click',e=>{
     if(e.target===document.getElementById('confirmBox')) closeConfirm();
 });
 
-setInterval(updateFaces,1000);
-updateFaces();
+// Initialize WebSocket connection on page load
+initWebSocket();
 </script>
 </body>
 </html>
